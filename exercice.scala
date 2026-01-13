@@ -660,6 +660,414 @@ object ExerciceTP {
   }
 
   // ============================================================================
+  // BONUS – FONCTIONNALITÉS AVANCÉES
+  // ============================================================================
+
+  // --------------------------------------------------------------------------
+  // Bonus 1 : Score de risque simple
+  // --------------------------------------------------------------------------
+  def calculScoreRisque(spark: SparkSession, transactions: DataFrame): DataFrame = {
+    import spark.implicits._
+
+    println("\n" + "=" * 80)
+    println("BONUS – FONCTIONNALITÉS AVANCÉES")
+    println("=" * 80)
+    println("\n>>> Bonus 1 : Calcul du score de risque")
+
+    // Préparation des données
+    val transactionsPrep = transactions
+      .withColumn("amount_clean", regexp_replace(col("amount"), "\\$", "").cast("double"))
+      .withColumn("jour", to_date(col("date")))
+      .withColumn("heure", hour(col("date")))
+      .withColumn("has_error", when(col("errors").isNotNull && col("errors") =!= "", 1).otherwise(0))
+
+    // Calcul des indicateurs par client
+    val indicateursClient = transactionsPrep
+      .groupBy("client_id")
+      .agg(
+        count("*").alias("nb_transactions"),
+        round(sum("amount_clean"), 2).alias("montant_total"),
+        round(avg("amount_clean"), 2).alias("montant_moyen"),
+        round(max("amount_clean"), 2).alias("montant_max"),
+        countDistinct("card_id").alias("nb_cartes"),
+        countDistinct("merchant_city").alias("nb_villes"),
+        countDistinct("jour").alias("nb_jours_actifs"),
+        sum("has_error").alias("nb_erreurs"),
+        // Transactions nocturnes (entre 0h et 6h)
+        sum(when(col("heure") >= 0 && col("heure") < 6, 1).otherwise(0)).alias("nb_tx_nocturnes"),
+        // Transactions en ligne
+        sum(when(col("merchant_city") === "ONLINE", 1).otherwise(0)).alias("nb_tx_online"),
+        // Nombre de marchands différents
+        countDistinct("merchant_id").alias("nb_marchands")
+      )
+
+    // Calcul des statistiques globales pour normaliser
+    val stats = indicateursClient.agg(
+      avg("nb_transactions").alias("avg_tx"),
+      stddev("nb_transactions").alias("std_tx"),
+      avg("montant_moyen").alias("avg_montant"),
+      stddev("montant_moyen").alias("std_montant"),
+      avg("nb_villes").alias("avg_villes"),
+      avg("nb_erreurs").alias("avg_erreurs")
+    ).collect()(0)
+
+    val avgTx = stats.getAs[Double]("avg_tx")
+    val avgMontant = stats.getAs[Double]("avg_montant")
+    val avgVilles = stats.getAs[Double]("avg_villes")
+    val avgErreurs = stats.getAs[Double]("avg_erreurs")
+
+    // Score de risque basé sur plusieurs critères (0-100)
+    // Chaque critère contribue au score final
+    val clientsAvecScore = indicateursClient
+      .withColumn("score_volume",
+        // Score basé sur le volume de transactions (max 20 points)
+        least(lit(20), col("nb_transactions") / avgTx * 10)
+      )
+      .withColumn("score_montant",
+        // Score basé sur le montant moyen élevé (max 20 points)
+        least(lit(20), col("montant_moyen") / avgMontant * 10)
+      )
+      .withColumn("score_geographique",
+        // Score basé sur la dispersion géographique (max 20 points)
+        least(lit(20), col("nb_villes") / avgVilles * 10)
+      )
+      .withColumn("score_erreurs",
+        // Score basé sur le taux d'erreur (max 20 points)
+        least(lit(20), (col("nb_erreurs") / col("nb_transactions")) * 100)
+      )
+      .withColumn("score_nocturne",
+        // Score basé sur les transactions nocturnes (max 10 points)
+        least(lit(10), (col("nb_tx_nocturnes") / col("nb_transactions")) * 50)
+      )
+      .withColumn("score_diversite",
+        // Score basé sur la diversité des marchands (max 10 points)
+        least(lit(10), col("nb_marchands") / col("nb_transactions") * 20)
+      )
+      .withColumn("score_risque",
+        round(
+          col("score_volume") +
+          col("score_montant") +
+          col("score_geographique") +
+          col("score_erreurs") +
+          col("score_nocturne") +
+          col("score_diversite"),
+          2
+        )
+      )
+      .withColumn("niveau_risque",
+        when(col("score_risque") >= 60, "ÉLEVÉ")
+          .when(col("score_risque") >= 40, "MOYEN")
+          .when(col("score_risque") >= 20, "FAIBLE")
+          .otherwise("TRÈS FAIBLE")
+      )
+
+    // Affichage des résultats
+    println("\n--- Distribution des scores de risque ---")
+    clientsAvecScore
+      .groupBy("niveau_risque")
+      .agg(
+        count("*").alias("nb_clients"),
+        round(avg("score_risque"), 2).alias("score_moyen"),
+        round(avg("montant_total"), 2).alias("montant_total_moyen")
+      )
+      .orderBy(desc("score_moyen"))
+      .show(truncate = false)
+
+    println("\n--- Top 20 clients à risque élevé ---")
+    clientsAvecScore
+      .filter(col("niveau_risque") === "ÉLEVÉ")
+      .select(
+        "client_id", "score_risque", "niveau_risque",
+        "nb_transactions", "montant_total", "nb_cartes",
+        "nb_villes", "nb_erreurs", "nb_tx_nocturnes"
+      )
+      .orderBy(desc("score_risque"))
+      .show(20, truncate = false)
+
+    println("\n--- Détail des composantes du score (Top 10) ---")
+    clientsAvecScore
+      .select(
+        col("client_id"), col("score_risque"),
+        round(col("score_volume"), 1).alias("vol"),
+        round(col("score_montant"), 1).alias("mnt"),
+        round(col("score_geographique"), 1).alias("geo"),
+        round(col("score_erreurs"), 1).alias("err"),
+        round(col("score_nocturne"), 1).alias("noc"),
+        round(col("score_diversite"), 1).alias("div")
+      )
+      .orderBy(desc("score_risque"))
+      .show(10, false)
+
+    clientsAvecScore
+  }
+
+  // --------------------------------------------------------------------------
+  // Bonus 2 : Sauvegarde en format Parquet
+  // --------------------------------------------------------------------------
+  def sauvegarderParquet(
+    spark: SparkSession,
+    clientsAvecScore: DataFrame,
+    suspiciousCards: DataFrame,
+    transactions: DataFrame,
+    outputPath: String = "output"
+  ): Unit = {
+    import spark.implicits._
+
+    println("\n>>> Bonus 2 : Sauvegarde en format Parquet")
+
+    // Créer le dossier de sortie s'il n'existe pas
+    val outputDir = Paths.get(outputPath)
+    if (!Files.exists(outputDir)) {
+      Files.createDirectories(outputDir)
+    }
+
+    // 1. Sauvegarder les scores de risque par client
+    println(s"\n--- Sauvegarde des scores de risque ---")
+    clientsAvecScore
+      .select(
+        "client_id", "score_risque", "niveau_risque",
+        "nb_transactions", "montant_total", "montant_moyen",
+        "nb_cartes", "nb_villes", "nb_erreurs"
+      )
+      .coalesce(1)
+      .write
+      .mode("overwrite")
+      .parquet(s"$outputPath/scores_risque")
+    println(s"  ✓ Scores sauvegardés dans $outputPath/scores_risque")
+
+    // 2. Sauvegarder les cartes suspectes
+    println(s"\n--- Sauvegarde des cartes suspectes ---")
+    
+    val transactionsPrep = transactions
+      .withColumn("amount_clean", regexp_replace(col("amount"), "\\$", "").cast("double"))
+      .withColumn("jour", to_date(col("date")))
+
+    val detailSuspects = transactionsPrep
+      .groupBy("card_id")
+      .agg(
+        first("client_id").alias("client_id"),
+        count("*").alias("total_tx"),
+        round(sum("amount_clean"), 2).alias("montant_total"),
+        countDistinct("merchant_city").alias("nb_villes")
+      )
+      .join(suspiciousCards, Seq("card_id"), "inner")
+
+    detailSuspects
+      .coalesce(1)
+      .write
+      .mode("overwrite")
+      .parquet(s"$outputPath/cartes_suspectes")
+    println(s"  ✓ Cartes suspectes sauvegardées dans $outputPath/cartes_suspectes")
+
+    // 3. Sauvegarder un résumé par niveau de risque
+    println(s"\n--- Sauvegarde du résumé par niveau de risque ---")
+    val resumeRisque = clientsAvecScore
+      .groupBy("niveau_risque")
+      .agg(
+        count("*").alias("nb_clients"),
+        round(sum("montant_total"), 2).alias("montant_total"),
+        round(avg("score_risque"), 2).alias("score_moyen"),
+        sum("nb_erreurs").alias("total_erreurs")
+      )
+
+    resumeRisque
+      .coalesce(1)
+      .write
+      .mode("overwrite")
+      .parquet(s"$outputPath/resume_risque")
+    println(s"  ✓ Résumé sauvegardé dans $outputPath/resume_risque")
+
+    println(s"\n✓ Tous les fichiers Parquet ont été sauvegardés dans '$outputPath/'")
+  }
+
+  // --------------------------------------------------------------------------
+  // Bonus 3 : Comparaison clients normaux vs suspects
+  // --------------------------------------------------------------------------
+  def comparaisonClientsNormauxVsSuspects(
+    spark: SparkSession,
+    transactions: DataFrame,
+    clientsAvecScore: DataFrame
+  ): Unit = {
+    import spark.implicits._
+
+    println("\n>>> Bonus 3 : Comparaison clients normaux vs suspects")
+
+    // Séparation en deux groupes basés sur le niveau de risque
+    val clientsSuspects = clientsAvecScore
+      .filter(col("niveau_risque").isin("ÉLEVÉ", "MOYEN"))
+      .select("client_id")
+      .withColumn("est_suspect", lit(true))
+
+    val clientsNormaux = clientsAvecScore
+      .filter(col("niveau_risque").isin("FAIBLE", "TRÈS FAIBLE"))
+      .select("client_id")
+      .withColumn("est_suspect", lit(false))
+
+    val clientsClasses = clientsSuspects.union(clientsNormaux)
+
+    // Préparation des transactions
+    val transactionsPrep = transactions
+      .withColumn("amount_clean", regexp_replace(col("amount"), "\\$", "").cast("double"))
+      .withColumn("heure", hour(col("date")))
+      .withColumn("jour_semaine", dayofweek(col("date")))
+      .withColumn("has_error", when(col("errors").isNotNull && col("errors") =!= "", 1).otherwise(0))
+      .withColumn("is_online", when(col("merchant_city") === "ONLINE", 1).otherwise(0))
+      .withColumn("is_nocturne", when(col("heure") >= 0 && col("heure") < 6, 1).otherwise(0))
+      .withColumn("is_weekend", when(col("jour_semaine").isin(1, 7), 1).otherwise(0))
+
+    // Jointure pour classifier les transactions
+    val transactionsClassees = transactionsPrep
+      .join(clientsClasses, Seq("client_id"), "left")
+      .na.fill(false, Seq("est_suspect"))
+
+    // -------------------------------------------------------------------------
+    // Comparaison statistique
+    // -------------------------------------------------------------------------
+    println("\n" + "-" * 60)
+    println("COMPARAISON STATISTIQUE : NORMAUX vs SUSPECTS")
+    println("-" * 60)
+
+    // 1. Statistiques générales
+    println("\n--- 1. Statistiques générales ---")
+    val statsGenerales = transactionsClassees
+      .groupBy("est_suspect")
+      .agg(
+        count("*").alias("nb_transactions"),
+        countDistinct("client_id").alias("nb_clients"),
+        round(avg("amount_clean"), 2).alias("montant_moyen"),
+        round(stddev("amount_clean"), 2).alias("ecart_type_montant"),
+        round(min("amount_clean"), 2).alias("montant_min"),
+        round(max("amount_clean"), 2).alias("montant_max")
+      )
+      .withColumn("groupe", when(col("est_suspect"), "SUSPECTS").otherwise("NORMAUX"))
+      .select("groupe", "nb_clients", "nb_transactions", "montant_moyen", "ecart_type_montant", "montant_min", "montant_max")
+
+    statsGenerales.show(truncate = false)
+
+    // 2. Comportement d'achat
+    println("\n--- 2. Comportement d'achat ---")
+    val comportementAchat = transactionsClassees
+      .groupBy("est_suspect")
+      .agg(
+        round(avg("amount_clean"), 2).alias("montant_moyen"),
+        round(sum("amount_clean") / countDistinct("client_id"), 2).alias("montant_total_par_client"),
+        round(count("*").cast("double") / countDistinct("client_id"), 2).alias("tx_par_client"),
+        round(avg("is_online") * 100, 2).alias("pct_achats_online"),
+        countDistinct("mcc").alias("nb_mcc_distincts")
+      )
+      .withColumn("groupe", when(col("est_suspect"), "SUSPECTS").otherwise("NORMAUX"))
+      .select("groupe", "montant_moyen", "montant_total_par_client", "tx_par_client", "pct_achats_online", "nb_mcc_distincts")
+
+    comportementAchat.show(truncate = false)
+
+    // 3. Comportement temporel
+    println("\n--- 3. Comportement temporel ---")
+    val comportementTemporel = transactionsClassees
+      .groupBy("est_suspect")
+      .agg(
+        round(avg("is_nocturne") * 100, 2).alias("pct_tx_nocturnes"),
+        round(avg("is_weekend") * 100, 2).alias("pct_tx_weekend"),
+        round(avg("heure"), 1).alias("heure_moyenne")
+      )
+      .withColumn("groupe", when(col("est_suspect"), "SUSPECTS").otherwise("NORMAUX"))
+      .select("groupe", "pct_tx_nocturnes", "pct_tx_weekend", "heure_moyenne")
+
+    comportementTemporel.show(truncate = false)
+
+    // 4. Taux d'erreur
+    println("\n--- 4. Taux d'erreur ---")
+    val tauxErreur = transactionsClassees
+      .groupBy("est_suspect")
+      .agg(
+        round(avg("has_error") * 100, 2).alias("taux_erreur_pct"),
+        sum("has_error").alias("total_erreurs"),
+        count("*").alias("total_transactions")
+      )
+      .withColumn("groupe", when(col("est_suspect"), "SUSPECTS").otherwise("NORMAUX"))
+      .select("groupe", "taux_erreur_pct", "total_erreurs", "total_transactions")
+
+    tauxErreur.show(truncate = false)
+
+    // 5. Distribution géographique
+    println("\n--- 5. Distribution géographique ---")
+    val distributionGeo = transactionsClassees
+      .groupBy("est_suspect")
+      .agg(
+        countDistinct("merchant_city").alias("nb_villes_distinctes"),
+        countDistinct("merchant_state").alias("nb_etats_distincts"),
+        round(countDistinct("merchant_city").cast("double") / countDistinct("client_id"), 2).alias("villes_par_client")
+      )
+      .withColumn("groupe", when(col("est_suspect"), "SUSPECTS").otherwise("NORMAUX"))
+      .select("groupe", "nb_villes_distinctes", "nb_etats_distincts", "villes_par_client")
+
+    distributionGeo.show(truncate = false)
+
+    // 6. Distribution des montants par tranche
+    println("\n--- 6. Distribution des montants par tranche ---")
+    val distributionMontants = transactionsClassees
+      .withColumn("tranche_montant",
+        when(col("amount_clean") < 10, "< 10 €")
+          .when(col("amount_clean") < 50, "10-50 €")
+          .when(col("amount_clean") < 200, "50-200 €")
+          .when(col("amount_clean") < 500, "200-500 €")
+          .otherwise(">= 500 €")
+      )
+      .groupBy("est_suspect", "tranche_montant")
+      .agg(count("*").alias("nb_tx"))
+      .withColumn("groupe", when(col("est_suspect"), "SUSPECTS").otherwise("NORMAUX"))
+
+    // Pivot pour avoir une vue côte à côte
+    val pivotMontants = distributionMontants
+      .groupBy("tranche_montant")
+      .pivot("groupe", Seq("NORMAUX", "SUSPECTS"))
+      .agg(first("nb_tx"))
+      .na.fill(0)
+      .orderBy(
+        when(col("tranche_montant") === "< 10 €", 1)
+          .when(col("tranche_montant") === "10-50 €", 2)
+          .when(col("tranche_montant") === "50-200 €", 3)
+          .when(col("tranche_montant") === "200-500 €", 4)
+          .otherwise(5)
+      )
+
+    pivotMontants.show(truncate = false)
+
+    // 7. Top codes MCC par groupe
+    println("\n--- 7. Top 10 codes MCC par groupe ---")
+    
+    println("\nPour les clients NORMAUX :")
+    transactionsClassees
+      .filter(!col("est_suspect"))
+      .filter(col("mcc").isNotNull)
+      .groupBy("mcc")
+      .agg(count("*").alias("nb_tx"))
+      .orderBy(desc("nb_tx"))
+      .show(10, truncate = false)
+
+    println("\nPour les clients SUSPECTS :")
+    transactionsClassees
+      .filter(col("est_suspect"))
+      .filter(col("mcc").isNotNull)
+      .groupBy("mcc")
+      .agg(count("*").alias("nb_tx"))
+      .orderBy(desc("nb_tx"))
+      .show(10, truncate = false)
+
+    // Résumé final
+    println("\n" + "=" * 60)
+    println("RÉSUMÉ DES DIFFÉRENCES CLÉS")
+    println("=" * 60)
+    
+    val nbSuspects = clientsSuspects.count()
+    val nbNormaux = clientsNormaux.count()
+    val totalClients = nbSuspects + nbNormaux
+    
+    println(s"\n📊 Répartition des clients :")
+    println(s"   - Clients normaux   : $nbNormaux (${f"${nbNormaux.toDouble/totalClients*100}%.1f"}%%)")
+    println(s"   - Clients suspects  : $nbSuspects (${f"${nbSuspects.toDouble/totalClients*100}%.1f"}%%)")
+  }
+
+  // ============================================================================
   // MAIN
   // ============================================================================
 
@@ -679,26 +1087,33 @@ object ExerciceTP {
     // PARTIE 1
     // -------------------------------------------------------------------------
     val (transactions, cards, users, mcc) = chargementDonnees(spark, basePath)
-    analyseVolumetrie(transactions)
-    analyseQualiteDonnees(spark, transactions)
+    // analyseVolumetrie(transactions)
+    // analyseQualiteDonnees(spark, transactions)
 
     // -------------------------------------------------------------------------
     // PARTIE 2
     // -------------------------------------------------------------------------
-    val transactionsClean = analyseMontants(spark, transactions)
-    analyseTemporelle(spark, transactionsClean)
+    // val transactionsClean = analyseMontants(spark, transactions)
+    // analyseTemporelle(spark, transactionsClean)
 
     // -------------------------------------------------------------------------
     // PARTIE 3
     // -------------------------------------------------------------------------
-    val transactionsEnrichies = jointureMCC(spark, transactions, mcc)
-    analyseErreurs(spark, transactions)
+    // val transactionsEnrichies = jointureMCC(spark, transactions, mcc)
+    // analyseErreurs(spark, transactions)
 
     // -------------------------------------------------------------------------
     // PARTIE 4
     // -------------------------------------------------------------------------
-    val indicateurs = creationIndicateurs(spark, transactions)
+    // val indicateurs = creationIndicateurs(spark, transactions)
     val suspiciousCards = detectionSuspects(spark, transactions)
+
+    // -------------------------------------------------------------------------
+    // BONUS
+    // -------------------------------------------------------------------------
+    val clientsAvecScore = calculScoreRisque(spark, transactions)
+    sauvegarderParquet(spark, clientsAvecScore, suspiciousCards, transactions)
+    comparaisonClientsNormauxVsSuspects(spark, transactions, clientsAvecScore)
 
     spark.stop()
   }

@@ -1,3 +1,10 @@
 # Fichiers de données volumineux
 dataset/train_fraud_labels.json
 dataset/transactions_data.csv
+
+# Fichiers de sortie Parquet
+output/
+
+# Scala-cli (cache et build server)
+.scala-build/
+.bsp/
