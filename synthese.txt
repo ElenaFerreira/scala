@@ -1,0 +1,424 @@
+================================================================================
+SYNTHÈSE DES RÉPONSES - TP SCALA SPARK ANALYSE FRAUDE - Elena Ferreira M2TL
+================================================================================
+
+================================================================================
+PARTIE 1 – PRISE EN MAIN DES DONNÉES (EDA brute)
+================================================================================
+
+>>> Question 1 : Chargement des données
+
+NOMBRE DE COLONNES PAR FICHIER :
+- transactions_data : 12 colonnes
+- cards_data : 13 colonnes
+- users_data : 14 colonnes
+- mcc_codes : 2 colonnes
+
+TYPES DE DONNÉES INCORRECTS OU SUSPECTS :
+
+1. transactions_data :
+   - amount (String) → Devrait être Double/Decimal
+     Les valeurs contiennent le symbole "$" (ex: "$-77.00", "$14.57")
+   - zip (Double) → Devrait être String
+     Un code postal est un identifiant, pas une valeur numérique
+
+2. cards_data :
+   - credit_limit (String) → Devrait être Double/Decimal
+     Les valeurs contiennent le symbole "$" (ex: "$24295")
+   - has_chip (String) → Devrait être Boolean
+   - card_on_dark_web (String) → Devrait être Boolean
+   - expires (String) → Devrait être Date
+   - acct_open_date (String) → Devrait être Date
+
+3. users_data :
+   - per_capita_income (String) 
+   - yearly_income (String)
+   - total_debt (String) 
+   → Devrait être Double/Decimal
+     Les valeurs contiennent le symbole "$"
+
+4. mcc_codes :
+   - mcc (String) → Incohérence avec transactions_data où mcc est Integer
+     Cela posera problème lors des jointures (nécessite cast)
+
+--------------------------------------------------------------------------------
+
+>>> Question 2 : Analyse de volumétrie
+
+RÉSULTATS :
+- Nombre total de transactions : 13 305 915
+- Nombre de clients uniques    : 1 219
+- Nombre de cartes uniques     : 4 071
+- Nombre de commerçants uniques: 74 831
+
+Les TRANSACTIONS génèrent de loin le plus de lignes (13,3 millions).
+
+Ratios calculés :
+- Transactions par client     : 13 305 915 / 1 219 ≈ 10 915 transactions/client
+- Cartes par client           : 4 071 / 1 219 ≈ 3,3 cartes/client
+- Transactions par carte      : 13 305 915 / 4 071 ≈ 3 268 transactions/carte
+- Transactions par commerçant : 13 305 915 / 74 831 ≈ 178 transactions/commerçant
+
+================================================================================
+PARTIE 2 – ANALYSE DES MONTANTS & COMPORTEMENTS
+================================================================================
+
+>>> Question 4 : Analyse des montants
+
+STATISTIQUES DESCRIPTIVES :
+- Moyenne  : 42,98 €
+- Médiane  : 28,77 €
+- Minimum  : -500,00 € (remboursements/annulations)
+- Maximum  : 6 820,20 €
+
+QUARTILES :
+- Q1 (25%) : 8,53 €   → 25% des transactions < 8,53 €
+- Q2 (50%) : 28,77 €  → 50% des transactions < 28,77 €
+- Q3 (75%) : 62,93 €  → 75% des transactions < 62,93 €
+
+DISTRIBUTION PAR TRANCHE :
++------------+---------------+---------------+-----------------+
+| Tranche    | Nb transactions | % du total  | Montant moyen   |
++------------+---------------+---------------+-----------------+
+| < 10 €     | 3 574 928     | 26,87%        | -15,38 € (*)    |
+| 10 - 50 €  | 5 271 899     | 39,62%        | 26,83 €         |
+| 50 - 200 € | 4 134 911     | 31,08%        | 88,97 €         |
+| >= 200 €   | 324 177       | 2,44%         | 362,37 €        |
++------------+---------------+---------------+-----------------+
+(*) Montant moyen négatif dû aux remboursements inclus dans cette tranche
+
+Les montants élevés sont RARES.
+
+Arguments :
+1. Seulement 2,44% des transactions dépassent 200 €
+2. 97,56% des transactions sont inférieures à 200 €
+3. La médiane (28,77 €) est nettement inférieure à la moyenne (42,98 €)
+4. 75% des transactions (Q3) sont inférieures à 62,93 €
+5. Les tranches basses dominent : 66,49% des transactions sont < 50 €
+
+--------------------------------------------------------------------------------
+
+>>> Question 5 : Analyse temporelle
+
+PAR HEURE :
+- Nuit (0h-5h) : ~6% du volume, minimum à 3h (103k transactions)
+- Journée (6h-16h) : ~65% du volume, pic à 12h (953k transactions)
+- Ratio max/min : 9,2x
+
+PAR JOUR : Distribution homogène (~1,9M/jour), variation < 2%
+
+PAR MOIS : Légère saisonnalité (pic été, creux février/novembre)
+
+ANOMALIES : Les heures 1h-5h sont anormalement CALMES (10x moins que la journée)
+→ Transactions nocturnes = signal de vigilance pour la détection de fraude
+
+================================================================================
+PARTIE 3 – ENRICHISSEMENT MÉTIER (MCC & erreurs)
+================================================================================
+
+>>> Question 6 : Jointure avec les MCC
+
+TOP 10 DES CATÉGORIES PAR VOLUME DE TRANSACTIONS :
++-----+-----------------------------+---------------+
+| Rang| Catégorie                   | Nb transactions|
++-----+-----------------------------+---------------+
+|  1  | Grocery Stores, Supermarkets| 1 592 584     |
+|  2  | Miscellaneous Food Stores   | 1 460 875     |
+|  3  | Service Stations            | 1 424 711     |
+|  4  | Eating Places and Restaurants| 999 738      |
+|  5  | Drug Stores and Pharmacies  | 772 913       |
+|  6  | Tolls and Bridge Fees       | 674 135       |
+|  7  | Wholesale Clubs             | 601 942       |
+|  8  | Money Transfer              | 589 140       |
+|  9  | Taxicabs and Limousines     | 500 662       |
+| 10  | Fast Food Restaurants       | 499 659       |
++-----+-----------------------------+---------------+
+
+TOP 5 DES CATÉGORIES PAR MONTANT MOYEN :
++-----+---------------------------------------+-------------+---------------+
+| Rang| Catégorie                             | Montant moy | Nb transactions|
++-----+---------------------------------------+-------------+---------------+
+|  1  | Cruise Lines                          | 1 551,42 €  | 428           |
+|  2  | Steel Drums and Barrels               | 797,89 €    | 384           |
+|  3  | Fabricated Structural Metal Products  | 786,94 €    | 408           |
+|  4  | Miscellaneous Fabricated Metal Products| 786,78 €   | 351           |
+|  5  | Coated and Laminated Products         | 785,08 €    | 381           |
++-----+---------------------------------------+-------------+---------------+
+→ Catégories industrielles/métallurgiques avec très peu de transactions mais 
+  montants élevés
+
+Autres catégories notables à montant élevé :
+- Airlines : 729,83 € (2 861 transactions)
+- Hospitals : 726,08 € (3 468 transactions)
+
+Oui, plusieurs catégories présentent des RISQUES ÉLEVÉS.
+
+- Money Transfer : RISQUE ÉLEVÉ (blanchiment, transactions irréversibles)
+- Industries métallurgiques : RISQUE MODÉRÉ (peu de transactions, montants élevés ~780€)
+- Cruise Lines / Airlines : RISQUE MODÉRÉ (montants élevés, cible fraude carte volée)
+- Taxicabs : RISQUE MODÉRÉ (blanchiment par fausses courses)
+- Grocery / Stations : RISQUE FAIBLE (haut volume, petits montants)
+
++------------------------+--------+----------------+---------------+
+| Catégorie              | Volume | Montant moyen  | Niveau risque |
++------------------------+--------+----------------+---------------+
+| Money Transfer         | Élevé  | Modéré         | TRÈS ÉLEVÉ    |
+| Industries métallurgie | Faible | Très élevé     | ÉLEVÉ         |
+| Cruise Lines / Airlines| Faible | Très élevé     | MODÉRÉ        |
+| Taxicabs               | Élevé  | Faible         | MODÉRÉ        |
+| Grocery / Stations     | Élevé  | Faible         | FAIBLE        |
++------------------------+--------+----------------+---------------+
+
+--------------------------------------------------------------------------------
+
+>>> Question 7 : Analyse des erreurs
+
+STATISTIQUES GLOBALES :
+- Transactions avec erreurs : 211 393 / 13 305 915
+- Taux d'erreur global : 1,59%
+
+TYPES D'ERREURS LES PLUS FRÉQUENTS :
++------------------------+--------------+-----------+----------------+
+| Type d'erreur          | Nb occurrences| %        | Nature         |
++------------------------+--------------+-----------+----------------+
+| Insufficient Balance   | 130 902      | 61,92%   | Financière      |
+| Bad PIN                | 32 119       | 15,19%   | Authentification|
+| Technical Glitch       | 26 271       | 12,43%   | Technique       |
+| Bad Card Number        | 7 767        | 3,67%    | Authentification|
+| Bad Expiration         | 6 161        | 2,91%    | Authentification|
+| Bad CVV                | 6 106        | 2,89%    | Authentification|
+| Bad Zipcode            | 1 126        | 0,53%    | Authentification|
++------------------------+--------------+-----------+----------------+
+
+CARTES AVEC TAUX D'ERREUR ÉLEVÉ (TOP 5) :
++-------+------------------+----------+-----------+
+|card_id|total_transactions|nb_erreurs|taux_erreur|
++-------+------------------+----------+-----------+
+| 2220  | 6 726            | 1 006    | 14,96% ⚠️ |
+| 2644  | 6 530            | 954      | 14,61% ⚠️ |
+| 5586  | 6 600            | 951      | 14,41% ⚠️ |
+| 5364  | 4 277            | 443      | 10,36% ⚠️ |
+| 1016  | 23 424           | 1 226    | 5,23%     |
++-------+------------------+----------+-----------+
+→ 4 cartes avec taux > 10% (très suspect)
+→ Aucune carte avec 100% d'erreurs
+
+CLIENTS AVEC TAUX D'ERREUR ÉLEVÉ (TOP 5) :
++---------+------------------+----------+-----------+
+|client_id|total_transactions|nb_erreurs|taux_erreur|
++---------+------------------+----------+-----------+
+| 954     | 20 047           | 2 935    | 14,64% ⚠️ |
+| 1424    | 15 412           | 822      | 5,33%     |
+| 1888    | 40 105           | 2 109    | 5,26%     |
+| 1017    | 9 795            | 525      | 5,36%     |
+| 464     | 27 619           | 1 196    | 4,33%     |
++---------+------------------+----------+-----------+
+
+
+Un client avec beaucoup d'erreurs est-il suspect ?
+OUI, mais il faut NUANCER selon le TYPE d'erreur.
+
+CLASSIFICATION DES ERREURS PAR NIVEAU DE SUSPICION :
+
+🔴 ERREURS TRÈS SUSPECTES (indiquent une fraude potentielle) :
+- Bad PIN (15,19%) : Quelqu'un essaie des codes au hasard → carte volée
+- Bad Card Number (3,67%) : Tentative avec faux numéro → fraude en ligne
+- Bad CVV (2,89%) : CVV inventé → carte non en possession du fraudeur
+- Bad Expiration (2,91%) : Date devinée → même logique
+
+🟡 ERREURS MODÉRÉMENT SUSPECTES :
+- Bad Zipcode (0,53%) : Code postal incorrect → achat en ligne frauduleux
+- Combinaisons d'erreurs : Multiples échecs = tentatives répétées
+
+🟢 ERREURS PEU SUSPECTES (souvent légitimes) :
+- Insufficient Balance (61,92%) : Client qui dépense trop, problème financier
+- Technical Glitch (12,43%) : Problème technique, pas de fraude
+
+
+================================================================================
+PARTIE 5 – RESTITUTION
+================================================================================
+
+>>> Question 10 : Synthèse finale
+
+================================================================================
+1. QUELS PATTERNS PRINCIPAUX SONT OBSERVÉS ?
+================================================================================
+
+A) PATTERNS TEMPORELS
+--------------------
+• Distribution horaire à deux pics :
+  - Creux nocturne (1h-5h) : ~5% du volume, activité 10x inférieure à la journée
+  - Pic en journée (6h-16h) : ~65% du volume, maximum à 12h (pause déjeuner)
+  - Activité en soirée modérée (17h-23h)
+  
+• Distribution journalière homogène :
+  - Pas de variation significative entre les jours (~1,9M/jour)
+  - Écart max-min < 2%
+
+• Saisonnalité légère :
+  - Pic estival (juillet-août)
+  - Creux en février et novembre
+
+B) PATTERNS DE MONTANTS
+-----------------------
+• Majorité de petits montants, peu de gros montants :
+  - Médiane (28,77€) << Moyenne (42,98€)
+  - 66,5% des transactions < 50€
+  - Seulement 2,44% des transactions > 200€
+  
+• Présence de montants négatifs (remboursements) :
+  - Tranche < 10€ avec moyenne négative (-15,38€)
+  - Peuvent masquer des activités suspectes
+
+C) PATTERNS PAR CATÉGORIE COMMERCIALE
+-------------------------------------
+• Concentration du volume sur le quotidien :
+  - Top 3 : Grocery (12%), Food Stores (11%), Service Stations (11%)
+  
+• Opposition volume/montant :
+  - Catégories à haut volume = petits montants (alimentation, carburant)
+  - Catégories à faible volume = gros montants (croisières, industries)
+
+• Catégories à risque identifiées :
+  - Money Transfer : 589k transactions, vecteur de blanchiment
+  - Industries métallurgiques : profil atypique pour particuliers
+
+D) PATTERNS D'ERREURS
+---------------------
+• Taux d'erreur global faible (1,59%) mais concentré :
+  - 99,6% des clients ont un taux < 5%
+  - 5 clients outliers avec taux > 5%
+  - 1 client extrême (954) avec 14,64% d'erreurs
+
+• Dominance des erreurs financières :
+  - "Insufficient Balance" = 62% des erreurs
+  - Erreurs d'authentification (PIN, CVV) = 25%
+
+================================================================================
+2. QUELS INDICATEURS SEMBLENT UTILES POUR UN FUTUR MODÈLE ?
+================================================================================
+
+A) INDICATEURS TRANSACTIONNELS (par transaction)
+-----------------------------------------------------------------------------
+| Indicateur              | Type   | Justification                          |
+|-------------------------|--------|----------------------------------------|
+| amount_cleaned          | Num    | Montant nettoyé (sans $)               |
+| is_high_amount          | Bool   | Montant > 200€ (top 2,44%)             |
+| is_very_high_amount     | Bool   | Montant > 500€ (très rare)             |
+| is_night_transaction    | Bool   | Transaction entre 1h et 5h             |
+| is_negative_amount      | Bool   | Remboursement/annulation               |
+| hour_of_day             | Cat    | Heure de la transaction                |
+| day_of_week             | Cat    | Jour de la semaine                     |
+| is_online               | Bool   | Transaction en ligne (merchant=ONLINE) |
+| mcc_risk_level          | Cat    | Niveau de risque de la catégorie MCC   |
+| has_error               | Bool   | Présence d'erreur sur la transaction   |
+| error_type              | Cat    | Type d'erreur si présente              |
+
+B) INDICATEURS CLIENT (agrégés par client)
+-----------------------------------------------------------------------------
+| Indicateur                    | Type | Justification                      |
+|-------------------------------|------|------------------------------------|
+| client_avg_amount             | Num  | Montant moyen habituel             |
+| client_std_amount             | Num  | Variabilité des montants           |
+| client_transaction_count      | Num  | Volume d'activité                  |
+| client_error_rate             | Num  | Taux d'erreur global               |
+| client_night_transaction_rate | Num  | % de transactions nocturnes        |
+| client_high_amount_rate       | Num  | % de transactions > 200€           |
+| client_mcc_diversity          | Num  | Nombre de catégories fréquentées   |
+| client_favorite_mcc           | Cat  | Catégorie la plus utilisée         |
+
+C) INDICATEURS CARTE (agrégés par carte)
+---------------------------------------------------------------------------
+| Indicateur              | Type | Justification                          |
+|-------------------------|------|----------------------------------------|
+| card_error_rate         | Num  | Taux d'erreur de la carte              |
+| card_on_dark_web        | Bool | Carte compromise (donnée existante)    |
+| card_has_chip           | Bool | Protection physique                    |
+| card_age                | Num  | Ancienneté de la carte                 |
+| card_credit_limit       | Num  | Limite de crédit                       |
+| card_utilization_rate   | Num  | Taux d'utilisation du crédit           |
+
+D) INDICATEURS COMPORTEMENTAUX (dérivés)
+-----------------------------------------------------------------------------
+| Indicateur                      | Type | Justification                    |
+|---------------------------------|------|----------------------------------|
+| amount_vs_client_avg            | Num  | Écart au comportement habituel   |
+| time_since_last_transaction     | Num  | Délai depuis dernière transaction|
+| is_new_merchant                 | Bool | Premier achat chez ce commerçant |
+| is_new_mcc                      | Bool | Nouvelle catégorie pour le client|
+| consecutive_errors              | Num  | Erreurs consécutives sur carte   |
+| velocity_1h                     | Num  | Nb transactions dans l'heure     |
+| velocity_24h                    | Num  | Nb transactions dans les 24h     |
+
+================================================================================
+3. QUELLES LIMITES PRÉSENTENT CES DONNÉES ?
+================================================================================
+
+A) LIMITES DE QUALITÉ DES DONNÉES
+---------------------------------
+Types de données incorrects :
+    - Montants en String avec symbole "$" → nécessite nettoyage
+    - Booléens en String ("YES"/"NO")
+    - Dates en String non parsées
+    - Incohérence de type sur MCC (int vs string)
+
+Valeurs manquantes potentielles :
+   - zip = NULL pour transactions en ligne
+   - merchant_state = NULL pour "ONLINE"
+   - Pas de vérification exhaustive des NULL
+
+Données non normalisées :
+   - Pas de conversion de devises (tout en $)
+   - Pas d'ajustement pour l'inflation sur 10+ ans de données
+
+B) LIMITES DE REPRÉSENTATIVITÉ
+------------------------------
+Déséquilibre de volumétrie :
+   - Seulement 1 219 clients pour 13,3M transactions
+   - Chaque client = ~10 000 transactions en moyenne
+   - Peu de diversité de profils clients
+
+Absence de labels de fraude dans l'analyse exploratoire :
+   - On ne sait pas quelles transactions sont réellement frauduleuses
+   - Nécessite train_fraud_labels.json pour valider les hypothèses
+
+Biais géographique probable :
+   - Données américaines (codes postaux US, États US)
+   - Non généralisable à d'autres marchés
+
+C) LIMITES TEMPORELLES
+----------------------
+Données potentiellement obsolètes :
+   - Début en 2010 → comportements de consommation différents
+   - Évolution des méthodes de fraude non captée
+   - Pas de données récentes (post-COVID, paiement mobile)
+
+Pas de données en temps réel :
+   - Analyse statique, pas de flux continu
+   - Impossible de détecter des fraudes "en cours"
+
+D) LIMITES POUR LE MACHINE LEARNING
+-----------------------------------
+Absence de certaines features importantes :
+   - Localisation GPS du téléphone vs localisation marchand
+   - Historique de navigation/device fingerprint
+   - Score de crédit en temps réel
+   - Données 3D-Secure
+
+Granularité insuffisante :
+   - Pas d'horodatage à la seconde (minute seulement)
+   - Pas de séquence de transactions (numéro d'ordre)
+
+Risque de data leakage :
+   - Certaines colonnes (errors) peuvent contenir de l'information 
+     post-transaction qui ne serait pas disponible en temps réel
+
+E) RECOMMANDATIONS POUR AMÉLIORER LES DONNÉES
+---------------------------------------------
+1. Ajouter des timestamps précis (millisecondes)
+2. Inclure la géolocalisation du device
+3. Ajouter des données comportementales (temps de saisie, device)
+4. Enrichir avec des données externes (listes noires, IP reputation)
+5. Normaliser les types de données à la source
+6. Créer un pipeline de mise à jour en temps réel
